@@ -1,0 +1,63 @@
+# ══════════════════════════════════════════════
+#  MACCHINAA-EVOLVED — Requirements
+#  نسخة محسّنة ومطوّرة من مشروع MACCHINAA
+# ══════════════════════════════════════════════
+
+# Core Django
+Django==4.2.16
+djangorestframework==3.15.2
+django-cors-headers==4.4.0
+
+# Database
+psycopg2-binary==2.9.9          # PostgreSQL
+dj-database-url==2.2.0
+
+# HTTP & Scraping
+requests==2.32.3
+httpx==0.27.2                   # Async HTTP (faster than requests)
+beautifulsoup4==4.12.3
+lxml==5.3.0
+playwright==1.48.0              # For JS-heavy sites (Copart, IAAI)
+fake-useragent==1.5.1           # Rotating User-Agents
+
+# Async & Scheduling
+celery==5.4.0                   # Task queue for background scraping
+redis==5.1.1                    # Celery broker + caching
+django-celery-beat==2.7.0       # Cron-style scheduling via DB
+django-celery-results==2.5.1    # Store task results
+
+# Data Processing
+pandas==2.2.3                   # Data analysis & deduplication
+orjson==3.10.11                 # Fast JSON
+
+# Caching
+django-redis==5.4.0
+
+# API & Serialization
+djangorestframework-simplejwt==5.3.1
+django-filter==24.3
+
+# Utils
+python-decouple==3.8            # .env management
+whitenoise==6.7.0               # Static files
+gunicorn==23.0.0
+Pillow==10.4.0
+python-dateutil==2.9.0
+
+# Monitoring & Logging
+sentry-sdk==2.17.0              # Error tracking
+django-silk==5.3.2              # SQL query profiler
+
+# Arabic & i18n
+arabic-reshaper==3.0.0
+python-bidi==0.4.2
+
+# Currency & Exchange Rates
+forex-python==1.8               # Live exchange rates
+
+# Notifications
+django-notifications-hq==1.8.3
+
+# Dev tools
+django-extensions==3.2.3
+ipython==8.28.0
