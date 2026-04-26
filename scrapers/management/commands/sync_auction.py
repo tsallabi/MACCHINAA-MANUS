@@ -33,7 +33,7 @@ from django.db import transaction
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_SOURCES = ["copart", "iaai", "bca", "japan", "govdeals", "manheim", "adesa", "all"]
+SUPPORTED_SOURCES = ["copart", "iaai", "acv", "encar", "kcar", "bca", "japan", "govdeals", "manheim", "adesa", "all", "korea", "usa"]
 
 
 class Command(BaseCommand):
@@ -45,7 +45,19 @@ class Command(BaseCommand):
             type=str,
             default="copart",
             choices=SUPPORTED_SOURCES,
-            help="مصدر المزاد: copart, iaai, bca, japan, govdeals, manheim, adesa, all",
+            help="مصدر المزاد: copart, iaai, acv, encar, kcar, bca, japan, govdeals, manheim, adesa, all, korea, usa",
+        )
+        parser.add_argument(
+            "--acv-username", type=str, default=None, dest="acv_username",
+            help="ACV Auctions username (dealer email)",
+        )
+        parser.add_argument(
+            "--acv-password", type=str, default=None, dest="acv_password",
+            help="ACV Auctions password",
+        )
+        parser.add_argument(
+            "--fetch-details", action="store_true", default=False, dest="fetch_details",
+            help="Fetch detailed info per vehicle (Encar — slower but richer)",
         )
         parser.add_argument(
             "--make",
@@ -124,8 +136,8 @@ class Command(BaseCommand):
             f"{'='*60}\n"
         ))
 
-        if source == "all":
-            self._sync_all(options)
+        if source in ("all", "korea", "usa"):
+            self._sync_group(source, options)
             return
 
         # Run single source
@@ -137,9 +149,14 @@ class Command(BaseCommand):
             f"   محدّث: {total_updated}\n"
         ))
 
-    def _sync_all(self, options):
-        """Sync from all sources sequentially."""
-        sources = ["copart", "iaai", "govdeals", "bca", "japan"]
+    def _sync_group(self, group: str, options):
+        """Sync from a group of sources."""
+        groups = {
+            "all": ["copart", "iaai", "acv", "encar", "kcar", "govdeals", "bca", "japan"],
+            "usa": ["copart", "iaai", "acv", "govdeals"],
+            "korea": ["encar", "kcar"],
+        }
+        sources = groups.get(group, ["copart", "iaai", "acv", "encar", "kcar", "govdeals", "bca", "japan"])
         total_created = total_updated = 0
 
         for source in sources:
@@ -147,14 +164,14 @@ class Command(BaseCommand):
             self.stdout.write(f"  ▶ بدء مزامنة: {source.upper()}")
             opts = dict(options)
             opts["source"] = source
-            opts["max_pages"] = min(options["max_pages"], 20)  # Limit per source in "all" mode
+            opts["max_pages"] = min(options["max_pages"], 20)
             created, updated = self._sync_source(source, opts)
             total_created += created
             total_updated += updated
 
         self.stdout.write(self.style.SUCCESS(
             f"\n{'='*60}\n"
-            f"✅ اكتملت مزامنة كل المصادر:\n"
+            f"✅ اكتملت مزامنة مجموعة [{group.upper()}]:\n"
             f"   إجمالي جديد: {total_created}\n"
             f"   إجمالي محدّث: {total_updated}\n"
             f"{'='*60}\n"
@@ -282,6 +299,22 @@ class Command(BaseCommand):
                 dealer_id=settings.ADESA_DEALER_ID,
                 delay=delay,
             )
+        elif source == "acv":
+            from scrapers.acv.acv_scraper import ACVScraper
+            return ACVScraper(
+                username=options.get("acv_username"),
+                password=options.get("acv_password"),
+                delay=delay,
+            )
+        elif source == "encar":
+            from scrapers.korea.encar_scraper import EncarScraper
+            return EncarScraper(
+                delay=delay,
+                fetch_details=options.get("fetch_details", False),
+            )
+        elif source == "kcar":
+            from scrapers.korea.kcar_scraper import KCarScraper
+            return KCarScraper(delay=delay)
         return None
 
     def _get_pages_generator(self, scraper, source, **kwargs):
@@ -322,6 +355,23 @@ class Command(BaseCommand):
         elif source == "govdeals":
             return scraper.fetch_pages(max_pages=max_pages)
         elif source in ("manheim", "adesa"):
+            return scraper.fetch_pages(
+                make=make, year_min=year_min, year_max=year_max,
+                max_pages=max_pages,
+            )
+        elif source == "acv":
+            return scraper.fetch_pages(
+                make=make, year_min=year_min, year_max=year_max,
+                max_pages=max_pages,
+            )
+        elif source == "encar":
+            if hot_models_only:
+                return scraper.fetch_hot_models_for_libya(max_pages=max_pages)
+            return scraper.fetch_pages(
+                make=make, year_min=year_min, year_max=year_max,
+                max_pages=max_pages,
+            )
+        elif source == "kcar":
             return scraper.fetch_pages(
                 make=make, year_min=year_min, year_max=year_max,
                 max_pages=max_pages,

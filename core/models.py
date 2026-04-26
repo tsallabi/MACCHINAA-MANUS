@@ -38,6 +38,8 @@ class AuctionSource(models.TextChoices):
     BCA      = "BCA",      "BCA Europe"
     JAPAN    = "JAPAN",    "Japan Auctions (USS/JAA)"
     GOVDEALS = "GOVDEALS", "GovDeals/GSA (USA)"
+    ENCAR    = "ENCAR",    "Encar (Korea)"
+    KCAR     = "KCAR",     "KCar (Korea)"
     MANUAL   = "MANUAL",   "Manual Entry"
 
 
