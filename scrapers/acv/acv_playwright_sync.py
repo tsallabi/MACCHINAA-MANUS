@@ -1,565 +1,438 @@
 """
-ACV Auctions Scraper — Playwright + Token Caching
-==================================================
-يسجّل الدخول مرة واحدة عبر متصفح حقيقي، يحفظ الـ JWT token،
-ثم يستخدمه مباشرة في كل الطلبات التالية بدون متصفح.
+acv_playwright_sync.py - ACV Auctions Scraper via Playwright + Token Cache
+==========================================================================
+ACV is protected by Cloudflare - only works from a real browser on your PC.
 
-الاستخدام:
+Strategy:
+  1. First run: Playwright logs in, captures the JWT token, saves it to disk
+  2. Next runs: uses the cached token directly (no browser needed, fast)
+  3. If token expires (401/403): automatically re-launches Playwright to refresh
+
+Requirements (run once on your PC):
+    pip install playwright
+    playwright install chromium
+
+Settings in settings.py:
+    ACV_EMAIL    = 'Macchina525@gmail.com'
+    ACV_PASSWORD = 'z43:-(!y81DZ?tp'
+
+Usage:
     python manage.py acv_playwright_sync
-    python manage.py acv_playwright_sync --make Toyota --max-pages 10
-    python manage.py acv_playwright_sync --refresh-token   # تجديد الـ token
+    python manage.py acv_playwright_sync --make Toyota --pages 10
+    python manage.py acv_playwright_sync --fetch-images
+    python manage.py acv_playwright_sync --refresh-token
     python manage.py acv_playwright_sync --dry-run
-
-المتطلبات:
-    pip install playwright && playwright install chromium
 """
-
-import json
-import time
-import logging
-import os
-import re
+from __future__ import annotations
+import json, logging, sqlite3, ssl, time, urllib.request
 from pathlib import Path
-from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Set
+from django.conf import settings
+from django.core.management.base import BaseCommand
 
-import requests
+logger = logging.getLogger("acv_playwright_sync")
 
-logger = logging.getLogger(__name__)
+ACV_SEARCH_URL = "https://api.acvauctions.com/v2/search/vehicles"
+ACV_IMAGES_URL = "https://api.acvauctions.com/v1/vehicles/{vid}/images"
+TOKEN_CACHE    = Path(settings.BASE_DIR) / ".acv_token_cache.json"
 
-# ── مسار حفظ الـ token ──────────────────────────────────────────────────────
-TOKEN_CACHE_PATH = Path(__file__).parent / ".acv_token_cache.json"
-TOKEN_TTL_HOURS  = 20   # ACV tokens تنتهي بعد ~24 ساعة
+SSL_CTX = ssl.create_default_context()
+SSL_CTX.check_hostname = False
+SSL_CTX.verify_mode = ssl.CERT_NONE
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  Token Manager
-# ══════════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
+# Token Management
+# ---------------------------------------------------------------------------
 
-class ACVTokenManager:
-    """يدير دورة حياة الـ JWT token لـ ACV."""
+def load_cached_token() -> Optional[str]:
+    """Load saved token if still valid (5 min buffer before expiry)."""
+    try:
+        if TOKEN_CACHE.exists():
+            data = json.loads(TOKEN_CACHE.read_text())
+            if data.get("expires_at", 0) > time.time() + 300:
+                return data.get("token")
+    except Exception:
+        pass
+    return None
 
-    def __init__(self, email: str, password: str):
-        self.email    = email
-        self.password = password
 
-    # ── قراءة من الكاش ──────────────────────────────────────────────────────
-    def _load_cached(self) -> dict | None:
-        if not TOKEN_CACHE_PATH.exists():
-            return None
-        try:
-            data = json.loads(TOKEN_CACHE_PATH.read_text())
-            expires = datetime.fromisoformat(data["expires_at"])
-            if datetime.utcnow() < expires:
-                logger.info("✓ ACV token من الكاش (صالح حتى %s)", expires.strftime("%H:%M"))
-                return data
-            logger.info("⚠ ACV token منتهي الصلاحية — سيتم التجديد")
-        except Exception as e:
-            logger.warning("خطأ في قراءة الكاش: %s", e)
-        return None
+def save_token(token: str, expires_in: int = 3600) -> None:
+    """Persist token with expiry timestamp."""
+    TOKEN_CACHE.write_text(json.dumps({
+        "token":      token,
+        "expires_at": time.time() + expires_in,
+    }))
 
-    # ── حفظ في الكاش ────────────────────────────────────────────────────────
-    def _save_cache(self, token: str, dealer_id: str = ""):
-        expires = datetime.utcnow() + timedelta(hours=TOKEN_TTL_HOURS)
-        data = {
-            "token":      token,
-            "dealer_id":  dealer_id,
-            "expires_at": expires.isoformat(),
-            "saved_at":   datetime.utcnow().isoformat(),
-        }
-        TOKEN_CACHE_PATH.write_text(json.dumps(data, indent=2))
-        logger.info("✓ Token محفوظ في %s", TOKEN_CACHE_PATH)
 
-    # ── تسجيل الدخول عبر Playwright ─────────────────────────────────────────
-    def _login_via_playwright(self) -> dict:
-        """يفتح متصفح Chromium، يسجّل الدخول، يلتقط الـ JWT."""
-        try:
-            from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-        except ImportError:
-            raise RuntimeError(
-                "Playwright غير مثبّت.\n"
-                "شغّل: pip install playwright && playwright install chromium"
+def get_token_via_playwright(email: str, password: str) -> str:
+    """
+    Launch headless Chromium, log in to ACV, capture the Bearer token.
+    Works only from your local PC - Cloudflare blocks cloud IPs.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise RuntimeError(
+            "Playwright not installed.\n"
+            "Run: pip install playwright && playwright install chromium"
+        )
+
+    captured: Dict[str, str] = {"token": ""}
+
+    def on_response(response):
+        auth = response.headers.get("authorization", "")
+        if auth.startswith("Bearer ") and "acvauctions" in response.url:
+            captured["token"] = auth.replace("Bearer ", "")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        ctx = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
             )
+        )
+        page = ctx.new_page()
+        page.on("response", on_response)
 
-        captured = {}
+        page.goto("https://app.acvauctions.com/login",
+                  wait_until="networkidle", timeout=60000)
+        page.fill('input[type="email"]',    email)
+        page.fill('input[type="password"]', password)
+        page.click('button[type="submit"]')
+        page.wait_for_url("**/marketplace**", timeout=30000)
+        page.wait_for_timeout(3000)
 
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                ],
-            )
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1280, "height": 800},
-            )
-            page = context.new_page()
+        # Fallback: try localStorage for JWT
+        t = page.evaluate("""() => {
+            for (let k of Object.keys(localStorage)) {
+                let v = localStorage.getItem(k);
+                if (v && v.startsWith('eyJ')) return v;
+            }
+            return '';
+        }""")
+        if t:
+            captured["token"] = t
 
-            # ── اعتراض الـ JWT من الطلبات الصادرة ───────────────────────────
-            def intercept_request(request):
-                auth = request.headers.get("authorization", "")
-                if auth.startswith("Bearer ") and len(auth) > 50:
-                    token = auth.replace("Bearer ", "").strip()
-                    if token not in captured.get("tokens", []):
-                        captured.setdefault("tokens", []).append(token)
-                        logger.debug("🔑 Token مُلتقط من: %s", request.url[:80])
+        browser.close()
 
-            page.on("request", intercept_request)
-
-            # ── فتح صفحة الدخول ─────────────────────────────────────────────
-            logger.info("🌐 فتح صفحة تسجيل الدخول...")
-            page.goto("https://app.acvauctions.com/login", wait_until="networkidle", timeout=30000)
-            time.sleep(2)
-
-            # ── إدخال بيانات الدخول ──────────────────────────────────────────
-            logger.info("📧 إدخال البريد الإلكتروني...")
-            email_sel = 'input[type="email"], input[name="email"], input[placeholder*="email" i]'
-            page.wait_for_selector(email_sel, timeout=15000)
-            page.fill(email_sel, self.email)
-
-            pass_sel = 'input[type="password"]'
-            page.wait_for_selector(pass_sel, timeout=10000)
-            page.fill(pass_sel, self.password)
-
-            # ── الضغط على زر الدخول ──────────────────────────────────────────
-            logger.info("🔐 تسجيل الدخول...")
-            btn_sel = 'button[type="submit"], button:has-text("Sign In"), button:has-text("Log In")'
-            page.click(btn_sel)
-
-            # ── انتظار التحميل ────────────────────────────────────────────────
-            try:
-                page.wait_for_url("**/dashboard**", timeout=20000)
-            except PWTimeout:
-                # بعض الحسابات تذهب لصفحة مختلفة
-                page.wait_for_load_state("networkidle", timeout=15000)
-
-            time.sleep(3)  # انتظار إضافي لالتقاط الـ tokens
-
-            # ── استخراج dealer_id من localStorage ────────────────────────────
-            dealer_id = ""
-            try:
-                storage = page.evaluate("() => JSON.stringify(window.localStorage)")
-                ls = json.loads(storage)
-                for key, val in ls.items():
-                    if "dealer" in key.lower() or "user" in key.lower():
-                        try:
-                            obj = json.loads(val)
-                            dealer_id = str(obj.get("dealerId") or obj.get("dealer_id") or "")
-                            if dealer_id:
-                                break
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-            browser.close()
-
-        if not captured.get("tokens"):
-            raise RuntimeError("❌ فشل التقاط الـ JWT token — تحقق من بيانات الدخول")
-
-        # أطول token هو الـ JWT الحقيقي
-        token = max(captured["tokens"], key=len)
-        logger.info("✅ تسجيل الدخول ناجح | dealer_id=%s", dealer_id or "غير محدد")
-        return {"token": token, "dealer_id": dealer_id}
-
-    # ── الواجهة العامة ───────────────────────────────────────────────────────
-    def get_token(self, force_refresh: bool = False) -> tuple[str, str]:
-        """يُعيد (token, dealer_id) — من الكاش أو بتسجيل دخول جديد."""
-        if not force_refresh:
-            cached = self._load_cached()
-            if cached:
-                return cached["token"], cached.get("dealer_id", "")
-
-        result = self._login_via_playwright()
-        self._save_cache(result["token"], result["dealer_id"])
-        return result["token"], result["dealer_id"]
+    token = captured["token"]
+    if not token:
+        raise RuntimeError(
+            "Could not extract ACV token. "
+            "Check credentials or try --refresh-token."
+        )
+    save_token(token, expires_in=3600)
+    logger.info("ACV token captured and saved.")
+    return token
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  ACV API Client
-# ══════════════════════════════════════════════════════════════════════════════
+def get_acv_token(email: str, password: str, force: bool = False) -> str:
+    """Return a valid token (cached or freshly obtained)."""
+    if not force:
+        cached = load_cached_token()
+        if cached:
+            return cached
+    return get_token_via_playwright(email, password)
 
-class ACVClient:
-    """يتواصل مع ACV gateways باستخدام الـ JWT token."""
 
-    GATEWAYS = {
-        "auction_house":  "https://auction-house.gateway.acvauctions.com",
-        "auction_launch": "https://auction-launch.gateway.acvauctions.com",
-        "inventory":      "https://inventory-service.gateway.acvauctions.com",
-        "apes":           "https://apes.gateway.acvauctions.com",
+# ---------------------------------------------------------------------------
+# API Calls
+# ---------------------------------------------------------------------------
+
+def search_acv(token: str, make: str = "", page: int = 0, size: int = 50):
+    """Fetch vehicle list from ACV search API."""
+    payload = {
+        "filters":    {"make": make} if make else {},
+        "pagination": {"page": page, "size": size},
+        "sort":       {"field": "endTime", "order": "asc"},
     }
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(ACV_SEARCH_URL, data=body, headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type":  "application/json",
+        "Accept":        "application/json",
+        "User-Agent":    "Mozilla/5.0 Chrome/120.0.0.0",
+        "Origin":        "https://app.acvauctions.com",
+        "Referer":       "https://app.acvauctions.com/marketplace",
+    })
+    resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=30)
+    data = json.loads(resp.read())
+    items = (data.get("data", {}).get("vehicles", [])
+             or data.get("vehicles", []))
+    total = (data.get("data", {}).get("totalCount", 0)
+             or data.get("totalCount", 0))
+    return items, total
 
-    def __init__(self, token: str, dealer_id: str = ""):
-        self.token     = token
-        self.dealer_id = dealer_id
-        self.session   = requests.Session()
-        self.session.headers.update({
-            "Authorization":  f"Bearer {token}",
-            "Content-Type":   "application/json",
-            "Accept":         "application/json",
-            "User-Agent":     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Origin":         "https://app.acvauctions.com",
-            "Referer":        "https://app.acvauctions.com/",
-            "x-acv-dealer-id": dealer_id,
-        })
 
-    def _get(self, gateway: str, path: str, params: dict = None) -> dict | None:
-        url = self.GATEWAYS[gateway].rstrip("/") + "/" + path.lstrip("/")
-        try:
-            r = self.session.get(url, params=params, timeout=20)
-            if r.status_code == 401:
-                logger.warning("⚠ Token منتهي — يجب التجديد")
-                return None
-            r.raise_for_status()
-            return r.json()
-        except requests.RequestException as e:
-            logger.error("خطأ في %s: %s", url, e)
-            return None
-
-    def search_vehicles(self, page: int = 1, per_page: int = 50,
-                        make: str = "", model: str = "") -> dict | None:
-        """البحث عن مركبات في المزادات الحية."""
-        params = {
-            "page":     page,
-            "per_page": per_page,
-            "sort":     "end_time",
-            "order":    "asc",
+def fetch_acv_images(token: str, vid: str) -> Dict:
+    """Fetch all images + video URL for a vehicle."""
+    try:
+        req = urllib.request.Request(
+            ACV_IMAGES_URL.format(vid=vid),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept":        "application/json",
+                "User-Agent":    "Mozilla/5.0 Chrome/120.0.0.0",
+            }
+        )
+        resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=15)
+        data = json.loads(resp.read())
+        imgs  = [i.get("url", "") for i in data.get("images", []) if i.get("url")]
+        video = data.get("videoUrl", "")
+        return {
+            "images": imgs,
+            "video":  video,
+            "total":  len(imgs) + (1 if video else 0),
         }
-        if make:
-            params["make"] = make
-        if model:
-            params["model"] = model
-
-        # محاولة auction-house أولاً
-        result = self._get("auction_house", "/api/v1/auctions/search", params)
-        if result:
-            return result
-
-        # fallback: auction-launch
-        return self._get("auction_launch", "/api/v1/vehicles", params)
-
-    def get_vehicle_detail(self, auction_id: str) -> dict | None:
-        """تفاصيل مركبة واحدة."""
-        return self._get("auction_house", f"/api/v1/auctions/{auction_id}")
-
-    def get_active_lanes(self) -> list:
-        """قائمة الـ lanes النشطة."""
-        result = self._get("apes", "/api/v1/lanes/active")
-        if result:
-            return result.get("lanes") or result.get("data") or []
-        return []
+    except Exception as e:
+        logger.debug("ACV images %s: %s", vid, e)
+        return {"images": [], "video": "", "total": 0}
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  Data Normalizer
-# ══════════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
 
-def normalize_acv_vehicle(raw: dict) -> dict:
-    """
-    يحوّل بيانات ACV الخام إلى الشكل المتوافق مع ManualCarData.
-    يتبع نفس أسلوب iaai_full_sync تماماً.
-    """
-    vehicle = raw.get("vehicle") or raw
-    auction  = raw.get("auction")  or raw
+def _s(v, n: int = 500) -> str:
+    return "" if v is None else str(v).strip()[:n]
 
-    # ── السعر ────────────────────────────────────────────────────────────────
-    current_bid   = float(auction.get("current_bid")   or vehicle.get("current_bid")   or 0)
-    buy_now_price = float(auction.get("buy_now_price") or vehicle.get("buy_now_price") or 0)
-    price = current_bid or buy_now_price or 0
 
-    # ── الصور ────────────────────────────────────────────────────────────────
-    images = vehicle.get("images") or []
-    if isinstance(images, list):
-        image_urls = [img.get("url") or img.get("src") or img for img in images if img]
-        image_urls = [u for u in image_urls if isinstance(u, str) and u.startswith("http")]
-    else:
-        image_urls = []
+def normalize_acv(raw: Dict, media: Optional[Dict] = None) -> Dict:
+    """Map ACV API response to ManualCarData schema."""
+    vid_id = _s(raw.get("id", ""))
+    thumb  = _s(raw.get("thumbnailUrl") or raw.get("imageUrl", ""))
 
-    main_image = image_urls[0] if image_urls else ""
+    media_json = ""
+    if media and media.get("total", 0) > 0:
+        media_json = json.dumps(media)
+    elif thumb:
+        media_json = json.dumps({"images": [thumb], "total": 1})
 
-    # ── التاريخ ───────────────────────────────────────────────────────────────
-    end_time = auction.get("end_time") or auction.get("auction_end") or ""
-    if end_time:
-        try:
-            end_time = datetime.fromisoformat(str(end_time).replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
-        except Exception:
-            end_time = str(end_time)[:16]
-
-    # ── الحقول الرئيسية ───────────────────────────────────────────────────────
     return {
-        "lot_number":       str(auction.get("id") or auction.get("auction_id") or raw.get("id") or ""),
-        "VIN":              vehicle.get("vin") or vehicle.get("VIN") or "",
-        "Year":             str(vehicle.get("year") or ""),
-        "Make":             vehicle.get("make") or vehicle.get("manufacturer") or "",
-        "Model":            vehicle.get("model") or "",
-        "Series":           vehicle.get("trim") or vehicle.get("series") or "",
-        "Body_Style":       vehicle.get("body_style") or vehicle.get("body_type") or "",
-        "Color":            vehicle.get("color") or vehicle.get("exterior_color") or "",
-        "Odometer":         str(vehicle.get("odometer") or vehicle.get("mileage") or ""),
-        "Odometer_Brand":   "Actual",
-        "Engine":           vehicle.get("engine") or vehicle.get("engine_description") or "",
-        "Transmission":     vehicle.get("transmission") or "",
-        "Drive":            vehicle.get("drive_type") or vehicle.get("drivetrain") or "",
-        "Fuel":             vehicle.get("fuel_type") or "",
-        "Keys":             "Yes" if vehicle.get("has_keys") else "No",
-        "Primary_Damage":   vehicle.get("primary_damage") or vehicle.get("damage") or "",
-        "Secondary_Damage": vehicle.get("secondary_damage") or "",
-        "Condition_Grade":  vehicle.get("condition_grade") or vehicle.get("grade") or "",
-        "Est_Retail_Value": str(vehicle.get("mmr") or vehicle.get("retail_value") or ""),
-        "Cur_Bid":          str(price),
-        "Buy_Now_Price":    str(buy_now_price),
-        "Currency_Code":    "USD",
-        "Auction_Date":     end_time,
-        "Yard_name":        vehicle.get("location") or vehicle.get("yard_name") or "ACV Auctions",
-        "State":            vehicle.get("state") or vehicle.get("location_state") or "",
-        "Zip_Code":         vehicle.get("zip") or vehicle.get("postal_code") or "",
-        "all_auctions":     "ACV",
-        "Img_url":          main_image,
-        "all_images":       json.dumps(image_urls[:20]),
-        "lot_url":          f"https://app.acvauctions.com/auction/{auction.get('id') or raw.get('id') or ''}",
-        "source_raw":       json.dumps(raw, ensure_ascii=False)[:2000],
+        "Lot_number":                  vid_id,
+        "VIN":                         _s(raw.get("vin", "")),
+        "Make":                        _s(raw.get("make", "")),
+        "Model_Group":                 _s(raw.get("model", "")),
+        "Year":                        _s(raw.get("year", "")),
+        "Color":                       _s(raw.get("exteriorColor") or raw.get("color", "")),
+        "Body_Style":                  _s(raw.get("bodyStyle", "")),
+        "Damage_Description":          _s(raw.get("conditionGrade") or raw.get("damage", "")),
+        "Odometer":                    _s(raw.get("mileage", "")),
+        "Engine":                      _s(raw.get("engine", "")),
+        "Drive":                       _s(raw.get("driveType", "")),
+        "Transmission":                _s(raw.get("transmission", "")),
+        "Fuel_Type":                   _s(raw.get("fuelType", "")),
+        "Cylinders":                   _s(raw.get("cylinders", "")),
+        "Runs_Drives":                 "Y" if raw.get("runsDrives") else "N",
+        "Has_Keys_Yes_or_No":          "Y" if raw.get("hasKeys") else "N",
+        "Sale_Status":                 _s(raw.get("status", "active")),
+        "High_Bid_non_vix_Sealed_Vix": _s(raw.get("currentBid", "")),
+        "Est_Retail_Value":            _s(raw.get("mmrValue") or raw.get("retailValue", "")),
+        "Sale_Date_M_D_CY":            _s(raw.get("endTime") or raw.get("saleDate", "")),
+        "Yard_name":                   _s(raw.get("sellerName") or raw.get("location", "ACV")),
+        "Location_city":               _s(raw.get("city", "")),
+        "Currency_Code":               "USD",
+        "Title_Brand":                 _s(raw.get("titleBrand", "")),
+        "all_auctions":                "ACV",
+        "Image_Thumbnail":             thumb,
+        "Image_URL":                   media_json,
     }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  Django Management Command
-# ══════════════════════════════════════════════════════════════════════════════
+# ---------------------------------------------------------------------------
+# Database
+# ---------------------------------------------------------------------------
 
-try:
-    from django.core.management.base import BaseCommand
-    from django.conf import settings
-    from django.db import connection
+def _get_existing(db_path: str) -> Set[str]:
+    try:
+        conn = sqlite3.connect(db_path, timeout=30)
+        rows = conn.execute(
+            'SELECT "Lot_number" FROM "schedulars_manualcardata" WHERE "all_auctions"=?',
+            ("ACV",)
+        ).fetchall()
+        conn.close()
+        return {r[0] for r in rows if r[0]}
+    except Exception as e:
+        logger.warning("DB read error: %s", e)
+        return set()
 
-    class Command(BaseCommand):
-        help = "جلب سيارات ACV Auctions عبر Playwright + JWT token caching"
 
-        def add_arguments(self, parser):
-            parser.add_argument("--make",          type=str, default="",    help="فلتر حسب الماركة")
-            parser.add_argument("--model",         type=str, default="",    help="فلتر حسب الموديل")
-            parser.add_argument("--max-pages",     type=int, default=20,    help="أقصى عدد صفحات")
-            parser.add_argument("--per-page",      type=int, default=50,    help="سيارات لكل صفحة")
-            parser.add_argument("--delay",         type=float, default=1.5, help="تأخير بين الصفحات")
-            parser.add_argument("--refresh-token", action="store_true",     help="تجديد الـ token")
-            parser.add_argument("--dry-run",       action="store_true",     help="اختبار بدون حفظ")
-            parser.add_argument("--resume",        action="store_true",     help="تخطي الـ VINs الموجودة")
+def _save_batch(cars: List[Dict], db_path: str, log_fn=print) -> int:
+    if not cars:
+        return 0
+    conn = sqlite3.connect(db_path, timeout=120)
+    conn.execute("PRAGMA busy_timeout=120000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    saved = 0
+    for car in cars:
+        lot = car.get("Lot_number", "")
+        if not lot:
+            continue
+        try:
+            conn.execute("""
+                INSERT OR REPLACE INTO "schedulars_manualcardata"
+                ("Lot_number","VIN","Make","Model_Group","Year","Color","Body_Style",
+                 "Damage_Description","Odometer","Engine","Drive","Transmission",
+                 "Fuel_Type","Cylinders","Runs_Drives","Has_Keys_Yes_or_No","Sale_Status",
+                 "High_Bid_non_vix_Sealed_Vix","Est_Retail_Value","Sale_Date_M_D_CY",
+                 "Yard_name","Location_city","Currency_Code","Title_Brand",
+                 "Image_Thumbnail","Image_URL","all_auctions")
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                lot, car.get("VIN",""), car.get("Make",""), car.get("Model_Group",""),
+                car.get("Year",""), car.get("Color",""), car.get("Body_Style",""),
+                car.get("Damage_Description",""), car.get("Odometer",""),
+                car.get("Engine",""), car.get("Drive",""), car.get("Transmission",""),
+                car.get("Fuel_Type",""), car.get("Cylinders",""),
+                car.get("Runs_Drives",""), car.get("Has_Keys_Yes_or_No",""),
+                car.get("Sale_Status","active"),
+                car.get("High_Bid_non_vix_Sealed_Vix",""),
+                car.get("Est_Retail_Value",""), car.get("Sale_Date_M_D_CY",""),
+                car.get("Yard_name","ACV"), car.get("Location_city",""),
+                car.get("Currency_Code","USD"), car.get("Title_Brand",""),
+                car.get("Image_Thumbnail",""), car.get("Image_URL",""), "ACV",
+            ))
+            saved += 1
+        except Exception as e:
+            log_fn(f"  [DB] {lot}: {e}")
+    conn.commit()
+    conn.close()
+    return saved
 
-        def handle(self, *args, **options):
-            logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-            email    = getattr(settings, "ACV_USERNAME", "") or os.getenv("ACV_USERNAME", "")
-            password = getattr(settings, "ACV_PASSWORD", "") or os.getenv("ACV_PASSWORD", "")
+# ---------------------------------------------------------------------------
+# Management Command
+# ---------------------------------------------------------------------------
 
-            if not email or not password:
-                self.stderr.write("❌ ACV_USERNAME و ACV_PASSWORD غير محددَين في settings.py أو .env")
-                return
+class Command(BaseCommand):
+    help = "Fetch vehicles from ACV Auctions via Playwright + Token Cache"
 
-            # ── الحصول على الـ token ──────────────────────────────────────────
-            self.stdout.write("🔑 الحصول على ACV token...")
-            manager = ACVTokenManager(email, password)
+    def add_arguments(self, parser):
+        parser.add_argument("--make",          type=str, default="",
+                            help="Filter by make (e.g. Toyota)")
+        parser.add_argument("--pages",         type=int, default=5,
+                            help="Number of pages to fetch (50 cars each)")
+        parser.add_argument("--size",          type=int, default=50,
+                            help="Results per page")
+        parser.add_argument("--fetch-images",  action="store_true",
+                            help="Fetch full image gallery for each car")
+        parser.add_argument("--refresh-token", action="store_true",
+                            help="Force new Playwright login even if token is valid")
+        parser.add_argument("--dry-run",       action="store_true",
+                            help="Fetch but do not save to DB")
+
+    def handle(self, *args, **options):
+        make  = options["make"]
+        pages = options["pages"]
+        size  = options["size"]
+        fetch = options["fetch_images"]
+        force = options["refresh_token"]
+        dry   = options["dry_run"]
+
+        def log(m): self.stdout.write(m)
+
+        email    = getattr(settings, "ACV_EMAIL",    "")
+        password = getattr(settings, "ACV_PASSWORD", "")
+
+        if not email or not password:
+            self.stdout.write(self.style.ERROR(
+                "\n  ERROR: Add to settings.py:\n"
+                "     ACV_EMAIL    = 'your@email.com'\n"
+                "     ACV_PASSWORD = 'your_password'\n"
+            ))
+            return
+
+        db_path = settings.DATABASES["default"]["NAME"]
+        t0 = time.time()
+
+        log("=" * 65)
+        log("  ACV AUCTIONS SYNC - Playwright + Token Cache")
+        log("=" * 65)
+
+        # Get token
+        try:
+            token = get_acv_token(email, password, force)
+            log("  Token: OK (cached or freshly obtained)")
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(f"  Login failed: {e}"))
+            return
+
+        log(f"  Make: {make or 'ALL'} | Pages: {pages} | "
+            f"Images: {'YES' if fetch else 'NO'} | "
+            f"Dry-run: {'YES' if dry else 'NO'}")
+        log("-" * 65)
+
+        existing = _get_existing(db_path)
+        log(f"  Already in DB: {len(existing):,} ACV vehicles")
+
+        all_cars: List[Dict] = []
+        total_count = 0
+        total_saved = 0
+
+        for p in range(pages):
             try:
-                token, dealer_id = manager.get_token(force_refresh=options["refresh_token"])
+                items, total = search_acv(token, make, p, size)
+                if p == 0:
+                    total_count = total
+                    log(f"  ACV total available: {total_count:,}")
+
+                new_items = [i for i in items
+                             if _s(i.get("id", "")) not in existing]
+                log(f"  Page {p+1}/{pages}: {len(items)} fetched | "
+                    f"{len(new_items)} new")
+
+                if not items:
+                    log("  No more results.")
+                    break
+
+                for raw in new_items:
+                    vid_id = _s(raw.get("id", ""))
+                    if not vid_id:
+                        continue
+                    media = fetch_acv_images(token, vid_id) if fetch else None
+                    if fetch:
+                        time.sleep(0.3)
+                    car = normalize_acv(raw, media)
+                    all_cars.append(car)
+                    existing.add(vid_id)
+
+                # Flush every 200 cars
+                if len(all_cars) >= 200 and not dry:
+                    s = _save_batch(all_cars, db_path, log)
+                    total_saved += s
+                    log(f"  Flushed batch: {s} saved")
+                    all_cars = []
+
+                time.sleep(0.5)
+
             except Exception as e:
-                self.stderr.write(f"❌ فشل تسجيل الدخول: {e}")
-                return
-
-            client = ACVClient(token, dealer_id)
-
-            # ── جلب الـ VINs الموجودة (للـ resume) ───────────────────────────
-            existing_vins = set()
-            if options["resume"]:
-                with connection.cursor() as cur:
-                    cur.execute("SELECT VIN FROM schedulars_manualcardata WHERE all_auctions='ACV' AND VIN != ''")
-                    existing_vins = {row[0] for row in cur.fetchall()}
-                self.stdout.write(f"ℹ {len(existing_vins)} VIN موجود — سيتم تخطيها")
-
-            # ── جلب الصفحات ──────────────────────────────────────────────────
-            total_saved = 0
-            total_skipped = 0
-            total_errors = 0
-
-            for page_num in range(1, options["max_pages"] + 1):
-                self.stdout.write(f"📄 صفحة {page_num}/{options['max_pages']}...")
-
-                data = client.search_vehicles(
-                    page=page_num,
-                    per_page=options["per_page"],
-                    make=options["make"],
-                    model=options["model"],
-                )
-
-                if not data:
-                    self.stdout.write("⚠ لا بيانات — Token منتهي أو خطأ في الشبكة")
-                    # محاولة تجديد الـ token تلقائياً
+                log(f"  ERROR on page {p}: {e}")
+                # Auto-refresh token on auth errors
+                if "401" in str(e) or "403" in str(e):
                     try:
-                        token, dealer_id = manager.get_token(force_refresh=True)
-                        client = ACVClient(token, dealer_id)
-                        self.stdout.write("🔄 تم تجديد الـ token — إعادة المحاولة...")
-                        data = client.search_vehicles(page=page_num, per_page=options["per_page"])
+                        token = get_acv_token(email, password, force=True)
+                        log("  Token auto-refreshed, retrying...")
                     except Exception:
+                        log("  Token refresh failed. Stopping.")
                         break
+                time.sleep(3)
 
-                if not data:
-                    break
+        # Final flush
+        if all_cars and not dry:
+            total_saved += _save_batch(all_cars, db_path, log)
 
-                # استخراج قائمة السيارات من الـ response
-                vehicles = (
-                    data.get("auctions") or
-                    data.get("vehicles") or
-                    data.get("data") or
-                    data.get("results") or
-                    (data if isinstance(data, list) else [])
-                )
+        elapsed = time.time() - t0
+        log(f"\n{'='*65}")
+        log(f"  DONE | Total available: {total_count:,} | "
+            f"Saved: {total_saved} | Time: {elapsed:.0f}s")
+        log("=" * 65)
 
-                if not vehicles:
-                    self.stdout.write(f"✓ لا مزيد من النتائج في الصفحة {page_num}")
-                    break
-
-                for raw in vehicles:
-                    try:
-                        normalized = normalize_acv_vehicle(raw)
-                        vin = normalized.get("VIN", "")
-
-                        if options["resume"] and vin and vin in existing_vins:
-                            total_skipped += 1
-                            continue
-
-                        if options["dry_run"]:
-                            self.stdout.write(
-                                f"  [DRY] {normalized['Year']} {normalized['Make']} "
-                                f"{normalized['Model']} — ${normalized['Cur_Bid']}"
-                            )
-                            total_saved += 1
-                            continue
-
-                        self._save_to_db(normalized)
-                        total_saved += 1
-
-                        if vin:
-                            existing_vins.add(vin)
-
-                    except Exception as e:
-                        logger.error("خطأ في معالجة سيارة: %s", e)
-                        total_errors += 1
-
-                self.stdout.write(
-                    f"  ✓ الصفحة {page_num}: {len(vehicles)} سيارة | "
-                    f"محفوظ={total_saved} تخطي={total_skipped} خطأ={total_errors}"
-                )
-
-                if len(vehicles) < options["per_page"]:
-                    break  # آخر صفحة
-
-                time.sleep(options["delay"])
-
+        if dry:
+            log(f"  [DRY-RUN] Would have saved {len(all_cars)} cars.")
+        elif total_saved > 0:
             self.stdout.write(
-                self.style.SUCCESS(
-                    f"\n✅ اكتمل ACV Sync | "
-                    f"محفوظ={total_saved} | تخطي={total_skipped} | أخطاء={total_errors}"
-                )
+                self.style.SUCCESS(f"\n  Successfully imported {total_saved} cars from ACV!")
             )
-
-        def _save_to_db(self, car: dict):
-            """حفظ سيارة واحدة في ManualCarData بنفس أسلوب iaai_full_sync."""
-            with connection.cursor() as cur:
-                cur.execute("""
-                    SELECT id FROM schedulars_manualcardata
-                    WHERE lot_number = %s AND all_auctions = 'ACV'
-                    LIMIT 1
-                """, [car["lot_number"]])
-                row = cur.fetchone()
-
-                if row:
-                    cur.execute("""
-                        UPDATE schedulars_manualcardata SET
-                            VIN=%s, Year=%s, Make=%s, Model=%s, Series=%s,
-                            Body_Style=%s, Color=%s, Odometer=%s, Engine=%s,
-                            Transmission=%s, Drive=%s, Fuel=%s, Keys=%s,
-                            Primary_Damage=%s, Secondary_Damage=%s,
-                            Condition_Grade=%s, Est_Retail_Value=%s,
-                            Cur_Bid=%s, Buy_Now_Price=%s, Currency_Code=%s,
-                            Auction_Date=%s, Yard_name=%s, State=%s,
-                            Zip_Code=%s, Img_url=%s, all_images=%s,
-                            lot_url=%s, updated_at=CURRENT_TIMESTAMP
-                        WHERE id=%s
-                    """, [
-                        car["VIN"], car["Year"], car["Make"], car["Model"],
-                        car["Series"], car["Body_Style"], car["Color"],
-                        car["Odometer"], car["Engine"], car["Transmission"],
-                        car["Drive"], car["Fuel"], car["Keys"],
-                        car["Primary_Damage"], car["Secondary_Damage"],
-                        car["Condition_Grade"], car["Est_Retail_Value"],
-                        car["Cur_Bid"], car["Buy_Now_Price"], car["Currency_Code"],
-                        car["Auction_Date"], car["Yard_name"], car["State"],
-                        car["Zip_Code"], car["Img_url"], car["all_images"],
-                        car["lot_url"], row[0],
-                    ])
-                else:
-                    cur.execute("""
-                        INSERT INTO schedulars_manualcardata (
-                            lot_number, VIN, Year, Make, Model, Series,
-                            Body_Style, Color, Odometer, Odometer_Brand,
-                            Engine, Transmission, Drive, Fuel, Keys,
-                            Primary_Damage, Secondary_Damage, Condition_Grade,
-                            Est_Retail_Value, Cur_Bid, Buy_Now_Price,
-                            Currency_Code, Auction_Date, Yard_name, State,
-                            Zip_Code, all_auctions, Img_url, all_images,
-                            lot_url, created_at, updated_at
-                        ) VALUES (
-                            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-                        )
-                    """, [
-                        car["lot_number"], car["VIN"], car["Year"],
-                        car["Make"], car["Model"], car["Series"],
-                        car["Body_Style"], car["Color"], car["Odometer"],
-                        car["Odometer_Brand"], car["Engine"], car["Transmission"],
-                        car["Drive"], car["Fuel"], car["Keys"],
-                        car["Primary_Damage"], car["Secondary_Damage"],
-                        car["Condition_Grade"], car["Est_Retail_Value"],
-                        car["Cur_Bid"], car["Buy_Now_Price"], car["Currency_Code"],
-                        car["Auction_Date"], car["Yard_name"], car["State"],
-                        car["Zip_Code"], car["all_auctions"], car["Img_url"],
-                        car["all_images"], car["lot_url"],
-                    ])
-
-except ImportError:
-    # يعمل خارج Django أيضاً للاختبار
-    pass
-
-
-# ── اختبار مستقل ─────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    import sys
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-
-    email    = os.getenv("ACV_USERNAME", "Macchina525@gmail.com")
-    password = os.getenv("ACV_PASSWORD", "")
-
-    if not password:
-        print("❌ أضف ACV_PASSWORD في متغيرات البيئة")
-        sys.exit(1)
-
-    manager = ACVTokenManager(email, password)
-    token, dealer_id = manager.get_token()
-    print(f"✅ Token: {token[:40]}...")
-    print(f"   Dealer ID: {dealer_id}")
-
-    client = ACVClient(token, dealer_id)
-    print("\n🔍 جلب أول صفحة من المزادات...")
-    data = client.search_vehicles(page=1, per_page=10)
-    if data:
-        vehicles = data.get("auctions") or data.get("vehicles") or data.get("data") or []
-        print(f"✅ {len(vehicles)} سيارة في الصفحة الأولى")
-        for v in vehicles[:3]:
-            n = normalize_acv_vehicle(v)
-            print(f"  • {n['Year']} {n['Make']} {n['Model']} — ${n['Cur_Bid']}")
-    else:
-        print("⚠ لا بيانات — تحقق من الـ token")
