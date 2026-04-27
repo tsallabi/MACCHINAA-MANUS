@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MACCHINAA — منصة المزادات العالمية</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet">
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+<style>
+  * { font-family: 'Cairo', sans-serif; }
+  body { background: #0a0e1a; color: #e0e6f0; }
+
+  /* ── Navbar ── */
+  .navbar { background: linear-gradient(135deg, #0d1b2a 0%, #1a2744 100%); border-bottom: 1px solid #2a3a5c; }
+  .navbar-brand { font-size: 1.6rem; font-weight: 900; letter-spacing: 2px; }
+  .brand-m { color: #e63946; }
+  .brand-rest { color: #fff; }
+
+  /* ── Hero Stats ── */
+  .stats-bar { background: linear-gradient(90deg, #0d1b2a, #1a2744, #0d1b2a); padding: 1rem 0; border-bottom: 1px solid #2a3a5c; }
+  .stat-item { text-align: center; }
+  .stat-num { font-size: 1.8rem; font-weight: 900; color: #e63946; }
+  .stat-label { font-size: 0.75rem; color: #8899bb; text-transform: uppercase; letter-spacing: 1px; }
+
+  /* ── Source Badges ── */
+  .source-COPART { background: #e63946; }
+  .source-IAAI { background: #2196F3; }
+  .source-ENCAR { background: #4CAF50; }
+  .source-ACV { background: #FF9800; }
+  .source-MANHEIM { background: #9C27B0; }
+  .source-GOVDEALS { background: #607D8B; }
+  .source-BCA { background: #00BCD4; }
+  .source-JAPAN { background: #F44336; }
+  .source-badge { font-size: 0.7rem; padding: 2px 8px; border-radius: 12px; color: #fff; font-weight: 700; }
+
+  /* ── Filter Bar ── */
+  .filter-bar { background: #111827; border: 1px solid #1e2d45; border-radius: 12px; padding: 1.2rem; margin-bottom: 1.5rem; }
+  .filter-bar .form-control, .filter-bar .form-select {
+    background: #0d1b2a; border: 1px solid #2a3a5c; color: #e0e6f0; border-radius: 8px;
+  }
+  .filter-bar .form-control:focus, .filter-bar .form-select:focus {
+    border-color: #e63946; box-shadow: 0 0 0 2px rgba(230,57,70,0.2);
+  }
+  .filter-bar .form-control::placeholder { color: #4a5a7a; }
+  .filter-bar option { background: #0d1b2a; }
+
+  /* ── Car Cards ── */
+  .car-card {
+    background: #111827;
+    border: 1px solid #1e2d45;
+    border-radius: 14px;
+    overflow: hidden;
+    transition: all 0.3s ease;
+    height: 100%;
+  }
+  .car-card:hover {
+    border-color: #e63946;
+    transform: translateY(-4px);
+    box-shadow: 0 8px 30px rgba(230,57,70,0.2);
+  }
+  .car-img-wrap { position: relative; height: 200px; overflow: hidden; background: #0d1b2a; }
+  .car-img-wrap img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.3s; }
+  .car-card:hover .car-img-wrap img { transform: scale(1.05); }
+  .no-img { display: flex; align-items: center; justify-content: center; height: 100%; color: #2a3a5c; font-size: 3rem; }
+  .source-ribbon { position: absolute; top: 10px; right: 10px; }
+  .price-tag { position: absolute; bottom: 10px; left: 10px; background: rgba(0,0,0,0.85); padding: 4px 12px; border-radius: 20px; font-weight: 700; color: #4ade80; font-size: 0.95rem; }
+
+  .car-body { padding: 1rem; }
+  .car-title { font-size: 1rem; font-weight: 700; color: #fff; margin-bottom: 0.3rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .car-meta { font-size: 0.78rem; color: #8899bb; }
+  .car-meta span { margin-left: 0.8rem; }
+  .car-meta i { color: #e63946; margin-left: 3px; }
+  .damage-badge { background: rgba(230,57,70,0.15); color: #e63946; border: 1px solid rgba(230,57,70,0.3); border-radius: 6px; padding: 2px 8px; font-size: 0.72rem; display: inline-block; margin-top: 0.4rem; }
+  .btn-view { background: linear-gradient(135deg, #e63946, #c1121f); border: none; color: #fff; border-radius: 8px; font-weight: 600; font-size: 0.85rem; width: 100%; padding: 0.5rem; margin-top: 0.8rem; transition: all 0.2s; }
+  .btn-view:hover { background: linear-gradient(135deg, #ff4757, #e63946); color: #fff; transform: scale(1.02); }
+
+  /* ── Pagination ── */
+  .pagination .page-link { background: #111827; border-color: #1e2d45; color: #8899bb; }
+  .pagination .page-link:hover { background: #e63946; border-color: #e63946; color: #fff; }
+  .pagination .page-item.active .page-link { background: #e63946; border-color: #e63946; }
+
+  /* ── Source Filter Tabs ── */
+  .source-tabs { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  .source-tab { padding: 5px 14px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; cursor: pointer; border: 1px solid #2a3a5c; background: #111827; color: #8899bb; transition: all 0.2s; text-decoration: none; }
+  .source-tab:hover, .source-tab.active { color: #fff; border-color: #e63946; background: rgba(230,57,70,0.15); }
+  .source-tab.all.active { background: #e63946; }
+
+  /* ── Country Flag ── */
+  .flag { font-size: 1.1rem; }
+
+  /* ── Loading ── */
+  .loading-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 9999; align-items: center; justify-content: center; }
+  .spinner-border { width: 3rem; height: 3rem; border-color: #e63946; border-right-color: transparent; }
+</style>
+</head>
+<body>
+
+<!-- Loading Overlay -->
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="spinner-border" role="status"></div>
+</div>
+
+<!-- Navbar -->
+<nav class="navbar navbar-expand-lg sticky-top">
+  <div class="container-fluid px-4">
+    <a class="navbar-brand" href="/">
+      <span class="brand-m">M</span><span class="brand-rest">ACCHINAA</span>
+      <small style="font-size:0.6rem; color:#4a5a7a; display:block; margin-top:-8px; letter-spacing:3px;">EVOLVED BY MANUS AI</small>
+    </a>
+    <div class="d-flex align-items-center gap-3">
+      <span class="text-muted" style="font-size:0.8rem;">
+        <i class="fas fa-database text-danger me-1"></i>
+        {{ total_count }} سيارة
+      </span>
+      <a href="/api/v1/vehicles/" class="btn btn-sm btn-outline-danger">
+        <i class="fas fa-code me-1"></i>API
+      </a>
+    </div>
+  </div>
+</nav>
+
+<!-- Stats Bar -->
+<div class="stats-bar">
+  <div class="container-fluid px-4">
+    <div class="row g-2">
+      {% for stat in source_stats %}
+      <div class="col-auto stat-item">
+        <div class="stat-num">{{ stat.count }}</div>
+        <div class="stat-label">{{ stat.sync_source|default:"Other" }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+<!-- Main Content -->
+<div class="container-fluid px-4 py-4">
+
+  <!-- Filter Bar -->
+  <div class="filter-bar">
+    <form method="get" id="filterForm">
+      <div class="row g-2 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label text-muted" style="font-size:0.78rem;">بحث</label>
+          <input type="text" name="q" class="form-control" placeholder="ماركة، موديل، VIN..." value="{{ request.GET.q }}">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label text-muted" style="font-size:0.78rem;">المصدر</label>
+          <select name="source" class="form-select">
+            <option value="">كل المصادر</option>
+            <option value="COPART" {% if request.GET.source == 'COPART' %}selected{% endif %}>🇺🇸 Copart</option>
+            <option value="IAAI" {% if request.GET.source == 'IAAI' %}selected{% endif %}>🇺🇸 IAAI</option>
+            <option value="ACV" {% if request.GET.source == 'ACV' %}selected{% endif %}>🇺🇸 ACV</option>
+            <option value="ENCAR" {% if request.GET.source == 'ENCAR' %}selected{% endif %}>🇰🇷 Encar Korea</option>
+            <option value="KCAR" {% if request.GET.source == 'KCAR' %}selected{% endif %}>🇰🇷 KCar Korea</option>
+            <option value="MANHEIM" {% if request.GET.source == 'MANHEIM' %}selected{% endif %}>🇺🇸 Manheim</option>
+            <option value="GOVDEALS" {% if request.GET.source == 'GOVDEALS' %}selected{% endif %}>🇺🇸 GovDeals</option>
+            <option value="BCA" {% if request.GET.source == 'BCA' %}selected{% endif %}>🇪🇺 BCA Europe</option>
+            <option value="JAPAN" {% if request.GET.source == 'JAPAN' %}selected{% endif %}>🇯🇵 Japan</option>
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label text-muted" style="font-size:0.78rem;">الماركة</label>
+          <input type="text" name="make" class="form-control" placeholder="Toyota, BMW..." value="{{ request.GET.make }}">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label text-muted" style="font-size:0.78rem;">السعر الأقصى ($)</label>
+          <input type="number" name="max_price" class="form-control" placeholder="20000" value="{{ request.GET.max_price }}">
+        </div>
+        <div class="col-md-1">
+          <label class="form-label text-muted" style="font-size:0.78rem;">الترتيب</label>
+          <select name="sort" class="form-select">
+            <option value="-last_synced_at" {% if request.GET.sort == '-last_synced_at' or not request.GET.sort %}selected{% endif %}>الأحدث</option>
+            <option value="current_bid" {% if request.GET.sort == 'current_bid' %}selected{% endif %}>السعر ↑</option>
+            <option value="-current_bid" {% if request.GET.sort == '-current_bid' %}selected{% endif %}>السعر ↓</option>
+            <option value="-year" {% if request.GET.sort == '-year' %}selected{% endif %}>السنة ↓</option>
+          </select>
+        </div>
+        <div class="col-md-2 d-flex gap-2">
+          <button type="submit" class="btn btn-danger flex-fill">
+            <i class="fas fa-search me-1"></i>بحث
+          </button>
+          <a href="/" class="btn btn-outline-secondary">
+            <i class="fas fa-times"></i>
+          </a>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <!-- Results Count -->
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <div style="font-size:0.85rem; color:#8899bb;">
+      عرض <strong class="text-white">{{ page_obj.start_index }}</strong> –
+      <strong class="text-white">{{ page_obj.end_index }}</strong>
+      من <strong class="text-danger">{{ page_obj.paginator.count }}</strong> نتيجة
+    </div>
+    <div style="font-size:0.8rem; color:#4a5a7a;">
+      <i class="fas fa-sync-alt me-1"></i>
+      آخر تحديث: {{ last_sync|default:"غير محدد" }}
+    </div>
+  </div>
+
+  <!-- Cars Grid -->
+  <div class="row g-3">
+    {% for car in page_obj %}
+    <div class="col-xl-2 col-lg-3 col-md-4 col-sm-6">
+      <div class="car-card">
+        <div class="car-img-wrap">
+          {% if car.primary_image %}
+            <img src="{{ car.primary_image }}" alt="{{ car.make }} {{ car.model }}" loading="lazy"
+                 onerror="this.parentElement.innerHTML='<div class=\'no-img\'><i class=\'fas fa-car\'></i></div>'">
+          {% else %}
+            <div class="no-img"><i class="fas fa-car"></i></div>
+          {% endif %}
+          <div class="source-ribbon">
+            <span class="source-badge source-{{ car.sync_source }}">{{ car.sync_source }}</span>
+          </div>
+          {% if car.current_bid %}
+          <div class="price-tag">${{ car.current_bid|floatformat:0 }}</div>
+          {% endif %}
+        </div>
+        <div class="car-body">
+          <div class="car-title">{{ car.year }} {{ car.make }} {{ car.model }}</div>
+          {% if car.trim %}
+          <div style="font-size:0.75rem; color:#6b7a99; margin-bottom:0.3rem;">{{ car.trim }}</div>
+          {% endif %}
+          <div class="car-meta">
+            {% if car.odometer %}
+            <span><i class="fas fa-tachometer-alt"></i>{{ car.odometer|floatformat:0 }} {{ car.odometer_unit }}</span>
+            {% endif %}
+            {% if car.location_state %}
+            <span><i class="fas fa-map-marker-alt"></i>{{ car.location_state }}</span>
+            {% endif %}
+          </div>
+          {% if car.damage_primary %}
+          <div class="damage-badge"><i class="fas fa-exclamation-triangle me-1"></i>{{ car.damage_primary }}</div>
+          {% endif %}
+          {% if car.source_url %}
+          <a href="{{ car.source_url }}" target="_blank" class="btn btn-view">
+            <i class="fas fa-external-link-alt me-1"></i>عرض في المزاد
+          </a>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    {% empty %}
+    <div class="col-12 text-center py-5">
+      <i class="fas fa-car fa-3x text-muted mb-3 d-block"></i>
+      <p class="text-muted">لا توجد سيارات مطابقة للبحث</p>
+      <a href="/" class="btn btn-outline-danger">عرض الكل</a>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Pagination -->
+  {% if page_obj.has_other_pages %}
+  <nav class="mt-4">
+    <ul class="pagination justify-content-center flex-wrap">
+      {% if page_obj.has_previous %}
+      <li class="page-item">
+        <a class="page-link" href="?{% for k,v in request.GET.items %}{% if k != 'page' %}{{ k }}={{ v }}&{% endif %}{% endfor %}page={{ page_obj.previous_page_number }}">
+          <i class="fas fa-chevron-right"></i>
+        </a>
+      </li>
+      {% endif %}
+      {% for num in page_obj.paginator.page_range %}
+        {% if page_obj.number == num %}
+        <li class="page-item active"><span class="page-link">{{ num }}</span></li>
+        {% elif num > page_obj.number|add:'-3' and num < page_obj.number|add:'3' %}
+        <li class="page-item">
+          <a class="page-link" href="?{% for k,v in request.GET.items %}{% if k != 'page' %}{{ k }}={{ v }}&{% endif %}{% endfor %}page={{ num }}">{{ num }}</a>
+        </li>
+        {% endif %}
+      {% endfor %}
+      {% if page_obj.has_next %}
+      <li class="page-item">
+        <a class="page-link" href="?{% for k,v in request.GET.items %}{% if k != 'page' %}{{ k }}={{ v }}&{% endif %}{% endfor %}page={{ page_obj.next_page_number }}">
+          <i class="fas fa-chevron-left"></i>
+        </a>
+      </li>
+      {% endif %}
+    </ul>
+  </nav>
+  {% endif %}
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// Auto-submit on select change
+document.querySelectorAll('.filter-bar select').forEach(el => {
+  el.addEventListener('change', () => document.getElementById('filterForm').submit());
+});
+</script>
+</body>
+</html>
